@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       repo:
-        description: "GitHub repo to build (used when no zip is in this repo)"
+        description: "GitHub repo to build"
         default: "Isyblaze/Isy-opencode"
       ref:
-        description: "Branch or tag (empty = default branch)"
+        description: "Branch or tag (empty = default)"
         default: ""
 
 jobs:
@@ -15,28 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Checkout this repo (may contain the zip)
-        uses: actions/checkout@v4
-        with:
-          path: host
-
       - name: Get the source
         env:
           REPO: ${{ inputs.repo }}
           REF: ${{ inputs.ref }}
-        run: |
-          set -e
-          ZIP="$(ls host/*.zip 2>/dev/null | head -n1 || true)"
-          if [ -n "$ZIP" ]; then
-            echo "Using zip: $ZIP"
-            mkdir tmp && unzip -q "$ZIP" -d tmp
-            if [ "$(ls tmp | wc -l)" = "1" ] && [ -d "tmp/$(ls tmp)" ]; then mv "tmp/$(ls tmp)" src; else mv tmp src; fi
-          else
-            echo "Cloning $REPO ${REF:-(default branch)}"
-            git clone --depth 1 ${REF:+--branch "$REF"} "https://github.com/$REPO.git" src
-          fi
-          test -f src/package.json || { echo "src/package.json not found - wrong source layout"; ls src; exit 1; }
-          echo "BUN_VERSION=$(node -p "require('./src/package.json').packageManager.split('@')[1]")" >> "$GITHUB_ENV"
+        run: git clone --depth 1 ${REF:+--branch "$REF"} "https://github.com/$REPO.git" src
+
+      - name: Read Bun version
+        run: echo "BUN_VERSION=$(node -p "require('./src/package.json').packageManager.split('@')[1]")" >> "$GITHUB_ENV"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -51,4 +37,54 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Tweak server CORS so the mobile WebView is acce
+      - name: Allow mobile origin in server CORS
+        working-directory: src
+        run: sed -i 's#  if (input.startsWith("oc://renderer")) return true#&\n  if (input === "http://localhost" || input === "https://localhost" || input === "capacitor://localhost") return true#' packages/server/src/cors.ts
+
+      - name: Install dependencies
+        working-directory: src
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Build web UI
+        working-directory: src
+        env:
+          OPENCODE_CHANNEL: prod
+          VITE_OPENCODE_SERVER_MODE: none
+        run: bun run --cwd packages/app build
+
+      - name: Create mobile package.json
+        working-directory: src
+        run: mkdir -p mobile && echo '{"name":"isy-opencode-mobile","private":true,"version":"1.0.0","dependencies":{"@capacitor/android":"^6.2.0","@capacitor/core":"^6.2.0"},"devDependencies":{"@capacitor/cli":"^6.2.0"}}' > mobile/package.json
+
+      - name: Create Capacitor config
+        working-directory: src
+        run: echo '{"appId":"com.isyblaze.opencode","appName":"Isy OpenCode","webDir":"../packages/app/dist","server":{"androidScheme":"http","cleartext":true},"android":{"allowMixedContent":true}}' > mobile/capacitor.config.json
+
+      - name: Install Capacitor
+        working-directory: src/mobile
+        run: npm install
+
+      - name: Add Android platform
+        working-directory: src/mobile
+        run: npx cap add android
+
+      - name: Allow http servers
+        working-directory: src/mobile
+        run: sed -i 's#<application#<application android:usesCleartextTraffic="true"#' android/app/src/main/AndroidManifest.xml
+
+      - name: Add camera and mic permissions
+        working-directory: src/mobile
+        run: sed -i 's#</manifest>#<uses-permission android:name="android.permission.CAMERA" /><uses-permission android:name="android.permission.RECORD_AUDIO" /><uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" /><uses-permission android:name="android.permission.POST_NOTIFICATIONS" /><uses-feature android:name="android.hardware.camera" android:required="false" /></manifest>#' android/app/src/main/AndroidManifest.xml
+
+      - name: Sync web files into Android
+        working-directory: src/mobile
+        run: npx cap sync android
+
+      - name: Build debug APK
+        working-directory: src/mobile/android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: isy-opencode-debug-apk
+          path: src/mobile/android/app/build/outputs/apk/debug/app-debug.apk
