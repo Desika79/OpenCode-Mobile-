@@ -1,0 +1,54 @@
+name: build-apk
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "GitHub repo to build (used when no zip is in this repo)"
+        default: "Isyblaze/Isy-opencode"
+      ref:
+        description: "Branch or tag (empty = default branch)"
+        default: ""
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout this repo (may contain the zip)
+        uses: actions/checkout@v4
+        with:
+          path: host
+
+      - name: Get the source
+        env:
+          REPO: ${{ inputs.repo }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -e
+          ZIP="$(ls host/*.zip 2>/dev/null | head -n1 || true)"
+          if [ -n "$ZIP" ]; then
+            echo "Using zip: $ZIP"
+            mkdir tmp && unzip -q "$ZIP" -d tmp
+            if [ "$(ls tmp | wc -l)" = "1" ] && [ -d "tmp/$(ls tmp)" ]; then mv "tmp/$(ls tmp)" src; else mv tmp src; fi
+          else
+            echo "Cloning $REPO ${REF:-(default branch)}"
+            git clone --depth 1 ${REF:+--branch "$REF"} "https://github.com/$REPO.git" src
+          fi
+          test -f src/package.json || { echo "src/package.json not found - wrong source layout"; ls src; exit 1; }
+          echo "BUN_VERSION=$(node -p "require('./src/package.json').packageManager.split('@')[1]")" >> "$GITHUB_ENV"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Tweak server CORS so the mobile WebView is acce
